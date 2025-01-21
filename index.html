@@ -264,6 +264,29 @@
                 box-shadow: 0 0 10px rgba(74, 158, 255, 0.1);
             }
         }
+        #performance-monitor {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 1000;
+            pointer-events: none;
+            text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.5);
+        }
+        
+        #performance-monitor div {
+            margin: 2px 0;
+            white-space: pre;
+        }
+        
+        .perf-label {
+            color: #888;
+        }
         body {
             margin: 0;
             overflow: hidden;
@@ -272,6 +295,11 @@
     </style>
 </head>
 <body>
+    <div id="performance-monitor">
+        <div id="fps-counter"><span class="perf-label">FPS: </span>0</div>
+        <div id="frame-time"><span class="perf-label">Frame Time: </span>0 ms</div>
+        <div id="memory-usage"><span class="perf-label">Memory: </span>0 MB</div>
+    </div>
     <div id="viewport">
         <div id="gameArea">
             <div id="player"></div>
