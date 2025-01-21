@@ -24,23 +24,319 @@ if (buildingOptions.length === 0) {
 
 const GAME_WIDTH = 4000;
 const GAME_HEIGHT = 4000;
-const MINIMAP_SIZE = 200;
 const GRID_SIZE = 50;
-const BUILD_RANGE = 200;  // Reduced from 300 to 200 for smaller range
-const CHUNK_SIZE = 100;  // Changed from 50 to 100
-const VISION_RANGE = 250; // Reveal 5x5 grid squares around player
+const MINIMAP_SIZE = 200;
+const BUILD_RANGE = 200;
+const CHUNK_SIZE = 100;
+const VISION_RANGE = 250;
 const ENEMY_SPEED = 2;
-const SPAWN_INTERVAL = 3000; // Spawn every 3 seconds
-const MAX_SPAWNERS = 4; // Maximum number of spawners
-const MIN_SPAWNER_DISTANCE = 800; // Minimum distance between spawners and from player start
+const SPAWN_INTERVAL = 3000;
+const MAX_SPAWNERS = 4;
+const MIN_SPAWNER_DISTANCE = 800;
 const MAX_ENEMIES_PER_SPAWNER = 3;
+const ENEMY_POOL_SIZE = 50; // Pre-create 50 enemies
+const VIEWPORT_BUFFER = 200; // Extra area around viewport to keep enemies active
 
-// Initialize fog of war
-const chunks = new Map(); // Store fog chunks by their coordinates
+// Game state
+const chunks = new Map();
 const minimapChunks = new Map();
 const enemies = [];
 const placedBuildings = [];
 const spawners = [];
+let enemyPool = [];
+let pendingUpdates = new Map(); // Store position updates for batch processing
+
+class Quadtree {
+    constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
+        this.bounds = bounds;
+        this.maxObjects = maxObjects;
+        this.maxLevels = maxLevels;
+        this.level = level;
+        this.objects = [];
+        this.nodes = [];
+    }
+
+    clear() {
+        this.objects = [];
+        for (let i = 0; i < this.nodes.length; i++) {
+            if (this.nodes[i]) {
+                this.nodes[i].clear();
+            }
+        }
+        this.nodes = [];
+    }
+
+    split() {
+        const subWidth = this.bounds.width / 2;
+        const subHeight = this.bounds.height / 2;
+        const x = this.bounds.x;
+        const y = this.bounds.y;
+
+        this.nodes[0] = new Quadtree({
+            x: x + subWidth,
+            y: y,
+            width: subWidth,
+            height: subHeight
+        }, this.maxObjects, this.maxLevels, this.level + 1);
+
+        this.nodes[1] = new Quadtree({
+            x: x,
+            y: y,
+            width: subWidth,
+            height: subHeight
+        }, this.maxObjects, this.maxLevels, this.level + 1);
+
+        this.nodes[2] = new Quadtree({
+            x: x,
+            y: y + subHeight,
+            width: subWidth,
+            height: subHeight
+        }, this.maxObjects, this.maxLevels, this.level + 1);
+
+        this.nodes[3] = new Quadtree({
+            x: x + subWidth,
+            y: y + subHeight,
+            width: subWidth,
+            height: subHeight
+        }, this.maxObjects, this.maxLevels, this.level + 1);
+    }
+
+    getIndex(rect) {
+        let index = -1;
+        const verticalMidpoint = this.bounds.x + (this.bounds.width / 2);
+        const horizontalMidpoint = this.bounds.y + (this.bounds.height / 2);
+
+        const topQuadrant = (rect.y < horizontalMidpoint && rect.y + rect.height < horizontalMidpoint);
+        const bottomQuadrant = (rect.y > horizontalMidpoint);
+
+        if (rect.x < verticalMidpoint && rect.x + rect.width < verticalMidpoint) {
+            if (topQuadrant) {
+                index = 1;
+            }
+            else if (bottomQuadrant) {
+                index = 2;
+            }
+        }
+        else if (rect.x > verticalMidpoint) {
+            if (topQuadrant) {
+                index = 0;
+            }
+            else if (bottomQuadrant) {
+                index = 3;
+            }
+        }
+
+        return index;
+    }
+
+    insert(rect) {
+        if (this.nodes.length) {
+            const index = this.getIndex(rect);
+
+            if (index !== -1) {
+                this.nodes[index].insert(rect);
+                return;
+            }
+        }
+
+        this.objects.push(rect);
+
+        if (this.objects.length > this.maxObjects && this.level < this.maxLevels) {
+            if (this.nodes.length === 0) {
+                this.split();
+            }
+
+            let i = 0;
+            while (i < this.objects.length) {
+                const index = this.getIndex(this.objects[i]);
+                if (index !== -1) {
+                    this.nodes[index].insert(this.objects.splice(i, 1)[0]);
+                }
+                else {
+                    i++;
+                }
+            }
+        }
+    }
+
+    retrieve(rect) {
+        let returnObjects = [];
+        const index = this.getIndex(rect);
+
+        if (this.nodes.length) {
+            if (index !== -1) {
+                returnObjects = returnObjects.concat(this.nodes[index].retrieve(rect));
+            }
+            else {
+                for (let i = 0; i < this.nodes.length; i++) {
+                    returnObjects = returnObjects.concat(this.nodes[i].retrieve(rect));
+                }
+            }
+        }
+
+        returnObjects = returnObjects.concat(this.objects);
+
+        return returnObjects;
+    }
+}
+
+// Initialize quadtree
+const quadtree = new Quadtree({
+    x: 0,
+    y: 0,
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT
+});
+
+function initializeEnemyPool() {
+    const container = document.getElementById('enemies-container');
+    const minimapContainer = document.getElementById('minimap-enemies-container');
+
+    for (let i = 0; i < ENEMY_POOL_SIZE; i++) {
+        // Create main enemy element
+        const enemy = document.createElement('div');
+        enemy.className = 'enemy';
+        enemy.style.display = 'none';
+        enemy.style.transform = 'translate3d(0px, 0px, 0)';
+        enemy.style.willChange = 'transform';
+        container.appendChild(enemy);
+
+        // Create minimap element
+        const minimapEnemy = document.createElement('div');
+        minimapEnemy.className = 'minimap-enemy';
+        minimapEnemy.style.display = 'none';
+        minimapEnemy.style.transform = 'translate3d(0px, 0px, 0)';
+        minimapEnemy.style.willChange = 'transform';
+        minimapContainer.appendChild(minimapEnemy);
+
+        // Store in pool
+        enemyPool.push({
+            element: enemy,
+            minimapElement: minimapEnemy,
+            active: false,
+            x: 0,
+            y: 0,
+            spawner: null,
+            lastInViewport: false
+        });
+    }
+}
+
+function getEnemyFromPool(spawner) {
+    const enemy = enemyPool.find(e => !e.active);
+    if (!enemy) return null;
+
+    // Initialize enemy position
+    const spawnRadius = 100;
+    const angle = Math.random() * Math.PI * 2;
+    const spawnX = spawner.x + 50 + Math.cos(angle) * spawnRadius;
+    const spawnY = spawner.y + 50 + Math.sin(angle) * spawnRadius;
+
+    enemy.active = true;
+    enemy.x = spawnX;
+    enemy.y = spawnY;
+    enemy.spawner = spawner;
+    enemy.element.style.display = 'block';
+    enemy.minimapElement.style.display = 'block';
+    updateEntityPosition(enemy);
+
+    return enemy;
+}
+
+function updateEntityPosition(entity) {
+    // Add to pending updates instead of updating DOM directly
+    pendingUpdates.set(entity, {
+        x: entity.x,
+        y: entity.y
+    });
+}
+
+function applyPendingUpdates() {
+    pendingUpdates.forEach((pos, entity) => {
+        // Update main element
+        entity.element.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0)`;
+        
+        // Update minimap element
+        const minimapX = (pos.x / GAME_WIDTH) * MINIMAP_SIZE;
+        const minimapY = (pos.y / GAME_HEIGHT) * MINIMAP_SIZE;
+        entity.minimapElement.style.transform = `translate3d(${minimapX}px, ${minimapY}px, 0)`;
+    });
+    pendingUpdates.clear();
+}
+
+function isInViewport(x, y) {
+    return x >= cameraX - VIEWPORT_BUFFER &&
+           x <= cameraX + window.innerWidth + VIEWPORT_BUFFER &&
+           y >= cameraY - VIEWPORT_BUFFER &&
+           y <= cameraY + window.innerHeight + VIEWPORT_BUFFER;
+}
+
+function spawnEnemy(spawner) {
+    if (spawner.activeEnemies >= MAX_ENEMIES_PER_SPAWNER) return;
+    
+    const enemy = getEnemyFromPool(spawner);
+    if (!enemy) return;  // No available enemies in pool
+    
+    spawner.activeEnemies++;
+    updateSpawnerCounter(spawner);
+    enemies.push(enemy);
+}
+
+function removeEnemy(enemy) {
+    enemy.active = false;
+    enemy.element.style.display = 'none';
+    enemy.minimapElement.style.display = 'none';
+    enemy.spawner.activeEnemies--;
+    updateSpawnerCounter(enemy.spawner);
+    
+    const index = enemies.indexOf(enemy);
+    if (index > -1) {
+        enemies.splice(index, 1);
+    }
+}
+
+function updateEnemies() {
+    // Clear and rebuild quadtree
+    quadtree.clear();
+    enemies.forEach(enemy => {
+        quadtree.insert({
+            x: enemy.x,
+            y: enemy.y,
+            width: 30,
+            height: 30,
+            enemy: enemy
+        });
+    });
+
+    // Update enemy positions
+    enemies.forEach(enemy => {
+        // Always update position
+        const dx = x - enemy.x;
+        const dy = y - enemy.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance > 0) {
+            enemy.x += (dx / distance) * ENEMY_SPEED;
+            enemy.y += (dy / distance) * ENEMY_SPEED;
+            
+            // Only update DOM if in viewport
+            if (isInViewport(enemy.x, enemy.y)) {
+                updateEntityPosition(enemy);
+            } else {
+                // If enemy just left viewport, update one last time
+                if (enemy.lastInViewport) {
+                    updateEntityPosition(enemy);
+                    enemy.lastInViewport = false;
+                }
+            }
+        }
+        
+        // Track viewport status
+        if (isInViewport(enemy.x, enemy.y)) {
+            enemy.lastInViewport = true;
+        }
+    });
+}
 
 function createSpawner(x, y) {
     const spawner = document.createElement('div');
@@ -49,6 +345,12 @@ function createSpawner(x, y) {
     spawner.style.left = `${x}px`;
     spawner.style.top = `${y}px`;
     document.getElementById('gameArea').appendChild(spawner);
+
+    // Create enemy counter
+    const counter = document.createElement('div');
+    counter.className = 'spawner-counter';
+    counter.textContent = '0/' + MAX_ENEMIES_PER_SPAWNER;
+    spawner.appendChild(counter);
 
     // Create minimap indicator for the spawner
     const minimapSpawner = document.createElement('div');
@@ -65,6 +367,7 @@ function createSpawner(x, y) {
         height: 100,
         element: spawner,
         minimapElement: minimapSpawner,
+        counter: counter,
         type: 'spawner',
         activeEnemies: 0
     };
@@ -80,6 +383,10 @@ function createSpawner(x, y) {
     }, SPAWN_INTERVAL);
     
     return spawnerObj;
+}
+
+function updateSpawnerCounter(spawner) {
+    spawner.counter.textContent = spawner.activeEnemies + '/' + MAX_ENEMIES_PER_SPAWNER;
 }
 
 function initializeSpawners() {
@@ -125,54 +432,6 @@ function initializeSpawners() {
     }
 }
 
-function spawnEnemy(spawner) {
-    const enemy = document.createElement('div');
-    enemy.className = 'enemy';
-    
-    // Spawn at random position around the spawner
-    const spawnRadius = 100;
-    const angle = Math.random() * Math.PI * 2;
-    const spawnX = spawner.x + 50 + Math.cos(angle) * spawnRadius;
-    const spawnY = spawner.y + 50 + Math.sin(angle) * spawnRadius;
-    
-    enemy.style.left = `${spawnX}px`;
-    enemy.style.top = `${spawnY}px`;
-    enemiesContainer.appendChild(enemy);
-
-    // Create minimap indicator for the enemy
-    const minimapEnemy = document.createElement('div');
-    minimapEnemy.className = 'minimap-enemy';
-    minimapEnemy.style.left = (spawnX / GAME_WIDTH) * MINIMAP_SIZE + 'px';
-    minimapEnemy.style.top = (spawnY / GAME_HEIGHT) * MINIMAP_SIZE + 'px';
-    minimapEnemiesContainer.appendChild(minimapEnemy);
-    
-    const enemyObj = {
-        x: spawnX,
-        y: spawnY,
-        element: enemy,
-        minimapElement: minimapEnemy,
-        spawner: spawner
-    };
-    
-    spawner.activeEnemies++;
-    enemies.push(enemyObj);
-}
-
-function removeEnemy(enemy) {
-    // Remove from DOM
-    enemy.element.remove();
-    enemy.minimapElement.remove();
-    
-    // Decrease spawner's active enemy count
-    enemy.spawner.activeEnemies--;
-    
-    // Remove from enemies array
-    const index = enemies.indexOf(enemy);
-    if (index > -1) {
-        enemies.splice(index, 1);
-    }
-}
-
 function initializeFog() {
     const numChunksX = Math.ceil(GAME_WIDTH / CHUNK_SIZE);
     const numChunksY = Math.ceil(GAME_HEIGHT / CHUNK_SIZE);
@@ -212,6 +471,7 @@ function updateFogOfWar() {
     // Calculate player center position and chunk
     const playerCenterX = x + 25;
     const playerCenterY = y + 25;
+    
     const playerChunkX = Math.floor(playerCenterX / CHUNK_SIZE);
     const playerChunkY = Math.floor(playerCenterY / CHUNK_SIZE);
     
@@ -423,112 +683,6 @@ function placeBuilding(x, y) {
     return true;
 }
 
-function updateEnemies() {
-    enemies.forEach(enemy => {
-        // Move towards player
-        const dx = x - enemy.x;
-        const dy = y - enemy.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance > 0) {
-            enemy.x += (dx / distance) * ENEMY_SPEED;
-            enemy.y += (dy / distance) * ENEMY_SPEED;
-            
-            // Update enemy position
-            enemy.element.style.left = `${enemy.x}px`;
-            enemy.element.style.top = `${enemy.y}px`;
-            
-            // Update minimap position
-            enemy.minimapElement.style.left = (enemy.x / GAME_WIDTH) * MINIMAP_SIZE + 'px';
-            enemy.minimapElement.style.top = (enemy.y / GAME_HEIGHT) * MINIMAP_SIZE + 'px';
-        }
-    });
-}
-
-// Mouse position tracking
-viewport.addEventListener('mousemove', (e) => {
-    const rect = viewport.getBoundingClientRect();
-    mouseX = e.clientX - rect.left;
-    mouseY = e.clientY - rect.top;
-});
-
-// Building placement
-viewport.addEventListener('click', (e) => {
-    if (selectedBuilding) {
-        const { gridX, gridY, isValid } = updateGhostBuilding();
-        if (isValid) {
-            placeBuilding(gridX, gridY);
-        }
-    }
-});
-
-// Right click to cancel building placement
-viewport.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    if (selectedBuilding) {
-        selectBuilding(selectedBuilding);
-    }
-});
-
-function selectBuilding(building) {
-    console.log('Selecting building:', building);
-    // Remove previous selection
-    if (selectedBuilding) {
-        selectedBuilding.classList.remove('selected');
-    }
-    
-    // Add new selection
-    if (building !== selectedBuilding) {
-        building.classList.add('selected');
-        selectedBuilding = building;
-        console.log('New building selected');
-    } else {
-        selectedBuilding = null;
-        console.log('Building deselected');
-    }
-    
-    // Update build range visibility
-    updateBuildRange();
-}
-
-function updateBuildRange() {
-    if (selectedBuilding) {
-        buildRange.style.display = 'block';
-        buildRange.style.width = (BUILD_RANGE * 2) + 'px';
-        buildRange.style.height = (BUILD_RANGE * 2) + 'px';
-        
-        // Use exact player position for smooth movement
-        buildRange.style.left = (x + 25) + 'px';  // Add half player width
-        buildRange.style.top = (y + 25) + 'px';   // Add half player height
-    } else {
-        buildRange.style.display = 'none';
-    }
-}
-
-// Handle building clicks
-buildingOptions.forEach(building => {
-    building.addEventListener('click', () => selectBuilding(building));
-});
-
-function updateCamera() {
-    // Center camera if space is held OR camera follow is enabled
-    if (keys.space || cameraFollowEnabled) {
-        centerCamera();
-    }
-    
-    gameArea.style.transform = `translate(${-cameraX}px, ${-cameraY}px)`;
-    
-    const viewportWidth = (window.innerWidth / GAME_WIDTH) * MINIMAP_SIZE;
-    const viewportHeight = (window.innerHeight / GAME_HEIGHT) * MINIMAP_SIZE;
-    const viewportX = (cameraX / GAME_WIDTH) * MINIMAP_SIZE;
-    const viewportY = (cameraY / GAME_HEIGHT) * MINIMAP_SIZE;
-    
-    minimapViewport.style.width = viewportWidth + 'px';
-    minimapViewport.style.height = viewportHeight + 'px';
-    minimapViewport.style.left = viewportX + 'px';
-    minimapViewport.style.top = viewportY + 'px';
-}
-
 function updatePosition() {
     player.style.left = x + 'px';
     player.style.top = y + 'px';
@@ -549,26 +703,23 @@ function centerCamera() {
     cameraY = Math.max(0, Math.min(cameraY, GAME_HEIGHT - window.innerHeight));
 }
 
-function gameLoop() {
-    if (keys.w) y -= speed;
-    if (keys.s) y += speed;
-    if (keys.a) x -= speed;
-    if (keys.d) x += speed;
-    
-    x = Math.max(0, Math.min(x, GAME_WIDTH - 50));
-    y = Math.max(0, Math.min(y, GAME_HEIGHT - 50));
-    
-    if (keys.space) {
+function updateCamera() {
+    // Center camera if space is held OR camera follow is enabled
+    if (keys.space || cameraFollowEnabled) {
         centerCamera();
     }
     
-    updatePosition();
-    updateEnemies();
-    updateCamera();
-    updateGhostBuilding();
-    updateBuildRange();
+    gameArea.style.transform = `translate(${-cameraX}px, ${-cameraY}px)`;
     
-    requestAnimationFrame(gameLoop);
+    const viewportWidth = (window.innerWidth / GAME_WIDTH) * MINIMAP_SIZE;
+    const viewportHeight = (window.innerHeight / GAME_HEIGHT) * MINIMAP_SIZE;
+    const viewportX = (cameraX / GAME_WIDTH) * MINIMAP_SIZE;
+    const viewportY = (cameraY / GAME_HEIGHT) * MINIMAP_SIZE;
+    
+    minimapViewport.style.width = viewportWidth + 'px';
+    minimapViewport.style.height = viewportHeight + 'px';
+    minimapViewport.style.left = viewportX + 'px';
+    minimapViewport.style.top = viewportY + 'px';
 }
 
 // Edge scrolling functionality
@@ -658,9 +809,101 @@ document.addEventListener('keyup', (e) => {
     }
 });
 
+// Mouse position tracking
+viewport.addEventListener('mousemove', (e) => {
+    const rect = viewport.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+});
+
+// Building placement
+viewport.addEventListener('click', (e) => {
+    if (selectedBuilding) {
+        const { gridX, gridY, isValid } = updateGhostBuilding();
+        if (isValid) {
+            placeBuilding(gridX, gridY);
+        }
+    }
+});
+
+// Right click to cancel building placement
+viewport.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (selectedBuilding) {
+        selectBuilding(selectedBuilding);
+    }
+});
+
+function selectBuilding(building) {
+    console.log('Selecting building:', building);
+    // Remove previous selection
+    if (selectedBuilding) {
+        selectedBuilding.classList.remove('selected');
+    }
+    
+    // Add new selection
+    if (building !== selectedBuilding) {
+        building.classList.add('selected');
+        selectedBuilding = building;
+        console.log('New building selected');
+    } else {
+        selectedBuilding = null;
+        console.log('Building deselected');
+    }
+    
+    // Update build range visibility
+    updateBuildRange();
+}
+
+function updateBuildRange() {
+    if (selectedBuilding) {
+        buildRange.style.display = 'block';
+        buildRange.style.width = (BUILD_RANGE * 2) + 'px';
+        buildRange.style.height = (BUILD_RANGE * 2) + 'px';
+        
+        // Use exact player position for smooth movement
+        buildRange.style.left = (x + 25) + 'px';  // Add half player width
+        buildRange.style.top = (y + 25) + 'px';   // Add half player height
+    } else {
+        buildRange.style.display = 'none';
+    }
+}
+
+// Handle building clicks
+buildingOptions.forEach(building => {
+    building.addEventListener('click', () => selectBuilding(building));
+});
+
+function gameLoop() {
+    if (keys.w) y -= speed;
+    if (keys.s) y += speed;
+    if (keys.a) x -= speed;
+    if (keys.d) x += speed;
+    
+    x = Math.max(0, Math.min(x, GAME_WIDTH - 50));
+    y = Math.max(0, Math.min(y, GAME_HEIGHT - 50));
+    
+    if (keys.space) {
+        centerCamera();
+    }
+    
+    updatePosition();
+    updateEnemies();
+    updateCamera();
+    updateGhostBuilding();
+    updateBuildRange();
+    moveCamera();
+    
+    // Apply all position updates at once
+    applyPendingUpdates();
+    
+    requestAnimationFrame(gameLoop);
+}
+
 // Initialize
 initializeFog();
 initializeMinimapFog();
-initializeSpawners(); // Add spawner initialization
+initializeEnemyPool();
+initializeSpawners();
 centerCamera();
 gameLoop();
