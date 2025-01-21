@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Moving Square Game</title>
+    <style>
+        #gameArea {
+            background: #1a1a1a;
+            position: relative;
+            width: 4000px;
+            height: 4000px;
+            overflow: hidden;
+            background-image:
+                linear-gradient(#232323 1px, transparent 1px),
+                linear-gradient(90deg, #232323 1px, transparent 1px);
+            background-size: 50px 50px;
+        }
+        .fog-chunk {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background: #0a0a0a;
+            transition: opacity 0.15s ease;
+        }
+        .fog-chunk.explored {
+            opacity: 0.6;
+        }
+        .fog-chunk.visible {
+            opacity: 0;
+        }
+        #fog-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+        #player {
+            width: 50px;
+            height: 50px;
+            background: #4a9eff;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            border-radius: 4px;
+            box-shadow: 0 0 20px rgba(74, 158, 255, 0.2);
+        }
+        #viewport {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            z-index: 2;
+        }
+        #minimap {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 200px;
+            height: 200px;
+            background: #232323;
+            border: 2px solid #333;
+            border-radius: 4px;
+            z-index: 3;
+        }
+        .minimap-fog-chunk {
+            position: absolute;
+            background: #0a0a0a;
+            transition: opacity 0.15s ease;
+        }
+        .minimap-fog-chunk.explored {
+            opacity: 0.6;
+        }
+        .minimap-fog-chunk.visible {
+            opacity: 0;
+        }
+        #minimap-fog-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+        #minimap-viewport {
+            border: 1px solid #4a9eff;
+            position: absolute;
+            pointer-events: none;
+            z-index: 2;
+        }
+        #minimap-player {
+            width: 4px;
+            height: 4px;
+            background: #00ffff;
+            position: absolute;
+            z-index: 2;
+        }
+        .minimap-building {
+            width: 3px;
+            height: 3px;
+            background: #4a9eff;
+            position: absolute;
+            border-radius: 50%;
+            opacity: 0.8;
+        }
+        #building-menu {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            background: rgba(26, 26, 26, 0.95);
+            border: 1px solid #333;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+            z-index: 1000;
+            color: white;
+        }
+        .building-option {
+            width: 60px;
+            height: 60px;
+            background: #232323;
+            border: 1px solid #444;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: Arial, sans-serif;
+            color: #4a9eff;
+            font-size: 20px;
+            position: relative;
+            z-index: 1001;
+        }
+        .building-option.selected {
+            background: #2a2a2a;
+            border-color: #4a9eff;
+            box-shadow: 0 0 10px rgba(74, 158, 255, 0.3);
+        }
+        .building-option:hover {
+            background: #2a2a2a;
+            border-color: #4a9eff;
+            box-shadow: 0 0 10px rgba(74, 158, 255, 0.2);
+        }
+        .hotkey {
+            position: absolute;
+            top: 2px;
+            left: 4px;
+            font-size: 12px;
+            color: #666;
+        }
+        .ghost-building {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background: rgba(74, 158, 255, 0.2);
+            border: 2px solid rgba(74, 158, 255, 0.5);
+            pointer-events: none;
+            display: none;
+            z-index: 1000;
+        }
+        .ghost-building.invalid {
+            background: rgba(255, 82, 82, 0.2);
+            border: 2px solid rgba(255, 82, 82, 0.5);
+        }
+        .building {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background: #4a9eff;
+            border-radius: 4px;
+            box-shadow: 0 0 20px rgba(74, 158, 255, 0.2);
+        }
+        
+        .spawner {
+            width: 100px;
+            height: 100px;
+            background: #ff4a4a;
+            position: absolute;
+            border-radius: 4px;
+            box-shadow: 0 0 20px rgba(255, 74, 74, 0.2);
+        }
+        
+        .enemy {
+            width: 30px;
+            height: 30px;
+            background: #ff4a4a;
+            position: absolute;
+            border-radius: 50%;
+            box-shadow: 0 0 10px rgba(255, 74, 74, 0.2);
+            transition: left 0.1s linear, top 0.1s linear;
+        }
+        
+        .minimap-spawner {
+            width: 4px;
+            height: 4px;
+            background: #ff4a4a;
+            position: absolute;
+            border-radius: 50%;
+            z-index: 2;
+        }
+        
+        .minimap-enemy {
+            width: 2px;
+            height: 2px;
+            background: #ff4a4a;
+            position: absolute;
+            border-radius: 50%;
+            z-index: 2;
+        }
+        
+        .build-range {
+            position: absolute;
+            border: 2px solid rgba(74, 158, 255, 0.3);
+            pointer-events: none;
+            display: none;
+            transform: translate(-50%, -50%);
+            animation: pulse 2s infinite;
+            z-index: 999;
+            border-radius: 0;
+            width: 600px;
+            height: 600px;
+            box-shadow: 0 0 20px rgba(74, 158, 255, 0.2);
+        }
+
+        @keyframes pulse {
+            0% {
+                border-color: rgba(74, 158, 255, 0.1);
+                box-shadow: 0 0 10px rgba(74, 158, 255, 0.1);
+            }
+            50% {
+                border-color: rgba(74, 158, 255, 0.3);
+                box-shadow: 0 0 10px rgba(74, 158, 255, 0.2);
+            }
+            100% {
+                border-color: rgba(74, 158, 255, 0.1);
+                box-shadow: 0 0 10px rgba(74, 158, 255, 0.1);
+            }
+        }
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+        }
+    </style>
+</head>
+<body>
+    <div id="viewport">
+        <div id="gameArea">
+            <div id="player"></div>
+            <div id="enemies-container"></div>
+            <div id="fog-container"></div>
+            <div id="ghost-building" class="ghost-building"></div>
+            <div id="build-range" class="build-range"></div>
+        </div>
+    </div>
+    <div id="minimap">
+        <div id="minimap-viewport"></div>
+        <div id="minimap-player"></div>
+        <div id="minimap-enemies-container"></div>
+        <div id="minimap-fog-container"></div>
+    </div>
+    <div id="building-menu">
+        <div class="building-option" data-key="1">
+            <span class="hotkey">1</span>
+            B1
+        </div>
+        <div class="building-option" data-key="2">
+            <span class="hotkey">2</span>
+            B2
+        </div>
+        <div class="building-option" data-key="3">
+            <span class="hotkey">3</span>
+            B3
+        </div>
+    </div>
+    <script src="scripts.js"></script>
+</body>
+</html>
