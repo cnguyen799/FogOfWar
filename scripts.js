@@ -338,12 +338,32 @@ function updateEnemies() {
     });
 }
 
+function updateEnemyVisibility() {
+    enemies.forEach(enemy => {
+        // Get the chunk coordinates for this enemy
+        const enemyChunkX = Math.floor(enemy.x / CHUNK_SIZE);
+        const enemyChunkY = Math.floor(enemy.y / CHUNK_SIZE);
+        const chunkKey = `${enemyChunkX},${enemyChunkY}`;
+        const chunk = chunks.get(chunkKey);
+        
+        // Check if the chunk is visible
+        if (chunk && chunk.classList.contains('visible')) {
+            enemy.element.style.display = 'block'; // Show enemy in the game world
+            enemy.minimapElement.style.display = 'block'; // Show enemy on the minimap
+        } else {
+            enemy.element.style.display = 'none'; // Hide enemy in the game world
+            enemy.minimapElement.style.display = 'none'; // Hide enemy on the minimap
+        }
+    });
+}
+
 function createSpawner(x, y) {
     const spawner = document.createElement('div');
     spawner.className = 'spawner';
     spawner.style.position = 'absolute';
     spawner.style.left = `${x}px`;
     spawner.style.top = `${y}px`;
+    spawner.style.display = 'none'; // Start hidden
     document.getElementById('gameArea').appendChild(spawner);
 
     // Create enemy counter
@@ -351,29 +371,30 @@ function createSpawner(x, y) {
     counter.className = 'spawner-counter';
     counter.textContent = '0/' + MAX_ENEMIES_PER_SPAWNER;
     spawner.appendChild(counter);
-
-    // Create minimap indicator for the spawner
+    
+    // Create minimap indicator
     const minimapSpawner = document.createElement('div');
     minimapSpawner.className = 'minimap-spawner';
     minimapSpawner.style.left = (x / GAME_WIDTH) * MINIMAP_SIZE + 'px';
     minimapSpawner.style.top = (y / GAME_HEIGHT) * MINIMAP_SIZE + 'px';
+    minimapSpawner.style.display = 'none'; // Start hidden
     document.getElementById('minimap').appendChild(minimapSpawner);
     
     // Store spawner with its dimensions and minimap element
-    const spawnerObj = { 
-        x, 
-        y, 
-        width: 100, 
+    const spawnerObj = {
+        x: x,
+        y: y,
+        width: 100,
         height: 100,
         element: spawner,
         minimapElement: minimapSpawner,
         counter: counter,
         type: 'spawner',
-        activeEnemies: 0
+        activeEnemies: 0,
+        discovered: false // Track discovery state
     };
     
     spawners.push(spawnerObj);
-    placedBuildings.push(spawnerObj);
     
     // Start spawning enemies
     setInterval(() => {
@@ -387,6 +408,23 @@ function createSpawner(x, y) {
 
 function updateSpawnerCounter(spawner) {
     spawner.counter.textContent = spawner.activeEnemies + '/' + MAX_ENEMIES_PER_SPAWNER;
+}
+
+function updateSpawnerVisibility() {
+    spawners.forEach(spawner => {
+        // Get the chunk coordinates for this spawner
+        const spawnerChunkX = Math.floor(spawner.x / CHUNK_SIZE);
+        const spawnerChunkY = Math.floor(spawner.y / CHUNK_SIZE);
+        const chunkKey = `${spawnerChunkX},${spawnerChunkY}`;
+        const chunk = chunks.get(chunkKey);
+        
+        if (chunk && chunk.classList.contains('visible') && !spawner.discovered) {
+            // Spawner's chunk is visible, reveal it permanently
+            spawner.discovered = true;
+            spawner.element.style.display = 'block';
+            spawner.minimapElement.style.display = 'block';
+        }
+    });
 }
 
 function initializeSpawners() {
@@ -471,15 +509,8 @@ function updateFogOfWar() {
     // Calculate player center position and chunk
     const playerCenterX = x + 25;
     const playerCenterY = y + 25;
-    
     const playerChunkX = Math.floor(playerCenterX / CHUNK_SIZE);
     const playerChunkY = Math.floor(playerCenterY / CHUNK_SIZE);
-    
-    // Calculate visible area in chunks around player
-    const visibleStartX = playerChunkX - 5;
-    const visibleEndX = playerChunkX + 5;
-    const visibleStartY = playerChunkY - 5;
-    const visibleEndY = playerChunkY + 5;
     
     // Calculate viewport chunks
     const viewportStartX = Math.floor(cameraX / CHUNK_SIZE);
@@ -545,6 +576,11 @@ function updateFogOfWar() {
             }
         }
     });
+    
+    // Update spawner visibility after fog update
+    updateSpawnerVisibility();
+    // Update enemy visibility after fog update
+    updateEnemyVisibility();
 }
 
 function updateMinimapFog() {
@@ -874,7 +910,57 @@ buildingOptions.forEach(building => {
     building.addEventListener('click', () => selectBuilding(building));
 });
 
-function gameLoop() {
+// Performance monitoring
+const performanceMonitor = {
+    fpsCounter: document.getElementById('fps-counter'),
+    frameTime: document.getElementById('frame-time'),
+    memoryUsage: document.getElementById('memory-usage'),
+    frameCount: 0,
+    lastTime: performance.now(),
+    lastFpsUpdate: 0,
+    lastFrameTimeUpdate: 0,
+    lastMemoryUpdate: 0,
+    frameTimeAvg: 0,
+    frameTimeCount: 0,
+    
+    update: function(currentTime) {
+        this.frameCount++;
+        const elapsed = currentTime - this.lastFpsUpdate;
+        
+        // Update FPS every second
+        if (elapsed >= 1000) {
+            const fps = Math.round((this.frameCount * 1000) / elapsed);
+            this.fpsCounter.innerHTML = `<span class="perf-label">FPS: </span>${fps}`;
+            this.frameCount = 0;
+            this.lastFpsUpdate = currentTime;
+        }
+        
+        // Calculate average frame time
+        const frameTimeMs = currentTime - this.lastTime;
+        this.frameTimeAvg += frameTimeMs;
+        this.frameTimeCount++;
+        
+        // Update frame time display every 500ms
+        if (currentTime - this.lastFrameTimeUpdate >= 500) {
+            const avgFrameTime = (this.frameTimeAvg / this.frameTimeCount).toFixed(1);
+            this.frameTime.innerHTML = `<span class="perf-label">Frame Time: </span>${avgFrameTime} ms`;
+            this.frameTimeAvg = 0;
+            this.frameTimeCount = 0;
+            this.lastFrameTimeUpdate = currentTime;
+        }
+        
+        // Update memory usage every 2 seconds if available
+        if (window.performance && window.performance.memory && currentTime - this.lastMemoryUpdate >= 2000) {
+            const memoryMB = Math.round(window.performance.memory.usedJSHeapSize / (1024 * 1024));
+            this.memoryUsage.innerHTML = `<span class="perf-label">Memory: </span>${memoryMB} MB`;
+            this.lastMemoryUpdate = currentTime;
+        }
+        
+        this.lastTime = currentTime;
+    }
+};
+
+function gameLoop(currentTime) {
     if (keys.w) y -= speed;
     if (keys.s) y += speed;
     if (keys.a) x -= speed;
@@ -893,6 +979,9 @@ function gameLoop() {
     updateGhostBuilding();
     updateBuildRange();
     moveCamera();
+    
+    // Update performance metrics
+    performanceMonitor.update(currentTime);
     
     // Apply all position updates at once
     applyPendingUpdates();
